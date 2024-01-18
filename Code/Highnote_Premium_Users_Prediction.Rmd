@@ -1,0 +1,1251 @@
+---
+title: "Highnote: Freemium to Premium Conversion Prediction"
+author: "Willy Feid"
+date: "2023-09-13"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    df_print: paged
+  pdf_document:
+    toc: yes
+    toc_depth: 2
+---
+\newpage
+
+
+```{r Load Libraries, message=FALSE, warning=FALSE, include=FALSE}
+library("tidyverse")
+library("skimr") # skim function
+library("readxl") # used to read excel files
+library("readr") # read csv
+library("dplyr") # data munging 
+library("FNN") # knn regression (knn.reg function)
+library("caret") # various predictive models
+library("class") # confusion matrix function
+library("rpart.plot") #plot decision tree
+library("rpart")  # Regression tree
+library("glmnet") # Lasso and Ridge regression
+library('NeuralNetTools') # plot NN's
+library("PRROC") # top plot ROC curve
+library("pROC")
+library("ROCR") # top plot lift curve
+library("abind")
+library("DMwR")
+library(ggplot2)
+library(randomForest)
+library(xgboost)
+```
+
+
+
+# 1. Data Preprocessing and Preparation
+
+---
+
+```{r Load Data}
+hn_df <- read_csv("../Data/HN_data_PostModule.csv", col_types = "fnnnnnnnnnnnnnnnnnnnnnnnnnn")
+```
+
+```{r Preview Data}
+# Preview data
+skim(hn_df)
+```
+
+```{r}
+# Check Proportions of variables
+round(prop.table(table(select(hn_df, adopter), exclude = NA)), 4) * 100
+
+round(prop.table(table(select(hn_df, male), exclude = NA)), 4) * 100
+
+round(prop.table(table(select(hn_df, good_country), exclude = NA)), 4) * 100
+
+round(prop.table(table(select(hn_df, delta1_good_country), exclude = NA)), 4) * 100
+```
+
+
+```{r Distrobutions}
+# Check the distributions of each variable (remvoe NA's) in order
+# to understand how to deal with NA's
+
+# Select only the numeric columns from hn_df
+numeric_columns <- sapply(hn_df, is.numeric)
+numeric_data <- hn_df[, numeric_columns]
+# Remove NA values from numeric columns
+numeric_data_clean <- na.omit(numeric_data)
+
+# Create histograms for each numeric column without NA values
+par(mfrow = c(3, 2))  
+for (col in names(numeric_data_clean)) {
+  hist(numeric_data_clean[[col]], main = col, xlab = col)
+}
+
+```
+
+## Cleaning:
+
+---
+
+
+```{r}
+# View NA's to refer back to during cleaning
+skim(hn_df)
+```
+
+
+```{r Initial Cleaning - pre predict imputation}
+# Cleaning friend_cnt, friend_country_cnt, subscriber_friend_cnt - each have only 1 NA so replacing with 0
+columns_with_na <- c("friend_cnt", "friend_country_cnt", "subscriber_friend_cnt")
+hn_df[columns_with_na] <- lapply(hn_df[columns_with_na], function(col) ifelse(is.na(col), 0, col))
+
+# Cleaning 'age': If age is NA, and avg_friend_age is not NA, impute with avg_friend_age.
+hn_df <- hn_df %>%
+  mutate(age = ifelse(is.na(age) & !is.na(avg_friend_age), avg_friend_age, age))
+
+# Cleaning avg_friend_age: If `avg_friend_age` is NA, and `age` is not NA, impute with `age`.         
+hn_df <- hn_df %>%
+  mutate(avg_friend_age = ifelse(is.na(avg_friend_age), age, avg_friend_age))
+
+# Cleaning delta1 variables with Median Imputation
+columns_to_impute <- c(
+  "delta1_friend_cnt", "delta1_avg_friend_age", "delta1_avg_friend_male", 
+  "delta1_friend_country_cnt", "delta1_subscriber_friend_cnt", "delta1_songsListened",
+  "delta1_lovedTracks", "delta1_posts", "delta1_playlists", "delta1_shouts"
+)
+
+hn_df <- hn_df %>%
+  mutate_at(vars(all_of(columns_to_impute)), ~ifelse(is.na(.), median(., na.rm = TRUE), .))
+
+# Cleaning delta1_good_country: Replace NA with zero (delta1_good_country says whether the person moved to a good_country (1) or away from a good_country (-1) and 0 if they did not move. Assumption is NA indicates person did not move)
+hn_df <- hn_df %>%
+  mutate(delta1_good_country = ifelse(is.na(delta1_good_country), 0, delta1_good_country))
+
+# Creating dummies for delta1_good_country to keep numeric binary format (instead of converting delta1_good_country to factor)
+hn_df$delta1_good_country_to <- ifelse(hn_df$delta1_good_country == 1, 1, 0)
+hn_df$delta1_good_country_away <- ifelse(hn_df$delta1_good_country == -1, 1, 0)
+
+# Removing delta1_good_country
+hn_df$delta1_good_country <- NULL
+
+# Replace NA in 'male' based on 'avg_friend_male'
+hn_df$male <- ifelse(is.na(hn_df$male) & !is.na(hn_df$avg_friend_male), ifelse(hn_df$avg_friend_male >= 0.5, 1, 0), hn_df$male)
+#Complete rate increase from 0.64 to 0.88.
+```
+
+```{r}
+# Use probabilistic imputation on the remaining 12% of NAs in `male`
+
+# Calculate proportion of males in the dataset (excluding NAs)
+prop_male <- sum(hn_df$male, na.rm = TRUE) / sum(!is.na(hn_df$male))
+
+# Replace NAs with 1s and 0s based on the observed proportion
+set.seed(1234)
+hn_df$male[is.na(hn_df$male)] <- ifelse(runif(sum(is.na(hn_df$male))) < prop_male, 1, 0)
+```
+
+```{r}
+# Check original proportion:
+print(prop_male)
+# Check new proportion:
+print(mean(hn_df$male))
+```
+
+
+```{r}
+# Mean imputation by gender for remaining NA's
+hn_df <- hn_df %>%
+  group_by(male) %>%
+  mutate(age = ifelse(is.na(age), mean(age, na.rm = TRUE), age)) %>%
+  ungroup()
+hn_df <- hn_df %>%
+  group_by(male) %>%
+  mutate(avg_friend_male = ifelse(is.na(avg_friend_male), mean(avg_friend_male, na.rm = TRUE), avg_friend_male)) %>%
+  ungroup()
+hn_df <- hn_df %>%
+  group_by(male) %>%
+  mutate(shouts = ifelse(is.na(shouts), mean(shouts, na.rm = TRUE), shouts)) %>%
+  ungroup()
+hn_df <- hn_df %>%
+  group_by(age) %>%
+  mutate(tenure = ifelse(is.na(tenure), mean(tenure, na.rm = TRUE), tenure)) %>%
+  ungroup()
+```
+
+```{r}
+# Fill NA of avg_friend_age with age
+hn_df <- hn_df %>%
+  mutate(avg_friend_age = ifelse(is.na(avg_friend_age), age, avg_friend_age))
+``` 
+
+```{r}
+# Cleaning `good_country`: 
+
+# Replace NA in good_country with 0 if delta1_good_country is 1
+hn_df$good_country[is.na(hn_df$good_country) & hn_df$delta1_good_country_to == 1] <- 0
+
+# Replace NA in good_country with 1 if delta1_good_country is -1
+hn_df$good_country[is.na(hn_df$good_country) & hn_df$delta1_good_country_away == 1] <- 1
+
+# Convert remaining NAs in good_country with "UNK"
+hn_df$good_country  = as.character(hn_df$good_country)
+hn_df$good_country <- hn_df$good_country %>% replace_na('UNK') 
+hn_df$good_country = as.factor(hn_df$good_country)
+
+# One-hot encoding on good_country
+# Use the dummyVars function to define the transformation
+dummy <- dummyVars("~ good_country", data=hn_df)
+
+# Apply the transformation to the data
+encoded_data <- predict(dummy, newdata = hn_df)
+# Remove the original 'good_country' column and bind new columns to hn_df
+hn_df$good_country <- NULL
+hn_df <- cbind(hn_df, encoded_data)
+
+```
+
+
+```{r}
+# Drop `good_country_UNK` -> causes multicollinearity 
+hn_df$good_country.UNK <- NULL
+# Check clean data
+skim(hn_df)
+```
+#### Cleaning Summary
+
+---
+
+  - There are NA values in 22 of 27 features with completion rates ranging from 99% to 52%.These will be handled differently based on the variable meaning, distribution, and quantity of missing values.
+  
+      - **`male`** *(1==Male, 0==Female)*: First, if `male` is NA and `avg_friend_male` (which represents the proportion of friends that are male) is not NA, then we will impute with 1 if `avg_friend_male` >= 0.5 and 0 if `avg_friend_male` < 0.5. Our assumption here is that if the majority of a persons friends are male, they are likely also male, and vise versa. After this step, we use probabilistic imputation to fill the remaining 12% of NA.
+      - **`age`**: First, if `age` is NA and `avg_friend_age` is not NA, then we will impute age with the average age of their friends. For the remaining NA's in `age` we will use mean imputation by gender
+      - **`avg_friend_age`**: First, if `avg_friend_age` is NA and `age` is not NA, then we will impute age with the average age of their friends. For the remaining NA's in `avg_friend_age` we will impute with `age` once all the NAs in `age` have been resolved.
+      - **`avg_friend_male`**: Mean Imputation grouped by `male`
+      - **`delta1`**: Median Imputation (except for delta1_good_country: Replace NA with zero (delta1_good_country says whether the person moved to a good_country (1) or away from a good_country (-1) and 0 if they did not move. Assumption is NA indicates person did not move). Instead of storing this as a factor, we created dummy's in order to keep numeric and binary.
+      - **`shouts`**: Mean Imputation by gender
+      - **`tenure`**: Mean Imputation by age.
+      - **`good_country`**: Because `delta1_good_country` is 1 if they moved to a good country and -1 if they moved away from a good country, this implies that a 1 in `delta1_good_country` must have a 0 in `good_country` and a -1 in `delta1_good_country` must have a 1 in `good_country`. In sum, if they moved away from a good country then they must have started in a good country and vise versa. We first impute NAs in `good_country` based on delta1 values. Then, we replace the remaining NAs with "UNK" and do one-hot encoding to create numeric data. The UNK dummy variable caused multicollinearity issues so it was dropped.
+
+#### Prepare to Record Model Metrics
+
+
+**Empty dataframe to store metrics**
+```{r clf_results}
+# Create an empty data frame to store results from different models
+clf_results <- data.frame(matrix(ncol = 5, nrow = 0))
+names(clf_results) <- c("Model", "Accuracy", "Precision", "Recall", "F1")
+```
+
+**Empty dataframe to store predictions**
+```{r cost_benefit_df}
+# Create an empty data frame to store TP, TN, FP and FN values
+cost_benefit_df <- data.frame(matrix(ncol = 5, nrow = 0))
+names(cost_benefit_df) <- c("Model", "TP", "FN", "FP", "TN")
+```
+
+**Functions to store model results**
+```{r record_results}
+record_results_1 <- function(predictions, actuals, model_name, current_clf_results, current_cost_benefit_df) {
+    
+    # Get confusion matrix
+    cm <- confusionMatrix(as.factor(predictions), as.factor(actuals), positive = "1")
+    
+    # Extract overall metrics and byClass metrics
+    overall_metrics <- cm[["overall"]]
+    class_metrics <- cm[["byClass"]]
+    
+    # Prepare new entries
+    new_clf_entry <- data.frame(Model = model_name, 
+                                Accuracy = round(overall_metrics[["Accuracy"]], 3), 
+                                Precision = round(class_metrics[["Precision"]], 3), 
+                                Recall = round(class_metrics[["Recall"]], 3), 
+                                F1 = round(class_metrics[["F1"]], 3))
+    
+    new_cost_entry <- data.frame(Model = model_name, 
+                                 TP = cm[["table"]][4], 
+                                 FN = cm[["table"]][3], 
+                                 FP = cm[["table"]][2], 
+                                 TN = cm[["table"]][1])
+    
+    # Print Accuracy and F1 score
+    cat("Accuracy for", model_name, "is", round(overall_metrics[["Accuracy"]], 3), 
+        "and F1 is", round(class_metrics[["F1"]], 3), "\n")
+    
+    # Return the updated dataframes
+    list(clf_results = rbind(current_clf_results, new_clf_entry), 
+         cost_benefit_df = rbind(current_cost_benefit_df, new_cost_entry))
+}
+
+record_results <- function(predictions, actuals, model_name, current_clf_results, current_cost_benefit_df) {
+    
+    # Get confusion matrix
+    cm <- confusionMatrix(as.factor(predictions), as.factor(actuals), positive = "YES")
+    
+    # Extract overall metrics and byClass metrics
+    overall_metrics <- cm[["overall"]]
+    class_metrics <- cm[["byClass"]]
+    
+    # Prepare new entries
+    new_clf_entry <- data.frame(Model = model_name, 
+                                Accuracy = round(overall_metrics[["Accuracy"]], 3), 
+                                Precision = round(class_metrics[["Precision"]], 3), 
+                                Recall = round(class_metrics[["Recall"]], 3), 
+                                F1 = round(class_metrics[["F1"]], 3))
+    
+    new_cost_entry <- data.frame(Model = model_name, 
+                                 TP = cm[["table"]][4], 
+                                 FN = cm[["table"]][3], 
+                                 FP = cm[["table"]][2], 
+                                 TN = cm[["table"]][1])
+    
+    # Print Accuracy and F1 score
+    cat("Accuracy for", model_name, "is", round(overall_metrics[["Accuracy"]], 3), 
+        "and F1 is", round(class_metrics[["F1"]], 3), "\n")
+    
+    # Return the updated dataframes
+    list(clf_results = rbind(current_clf_results, new_clf_entry), 
+         cost_benefit_df = rbind(current_cost_benefit_df, new_cost_entry))
+}
+
+```
+
+
+## Splitting Data
+
+---
+
+**Split x and y**
+```{r Split Train and Test}
+# create Y and X data frames
+df_y <- hn_df %>% pull(adopter) %>% as.factor()
+
+# exclude y (adopter) and net_user which is a user ID
+df_x = hn_df %>% select(-c("adopter", "net_user"))
+```
+
+
+**Split Train and Test**
+```{r}
+# 75% of the data is used for training and rest for testing
+smp_size <- floor(0.75 * nrow(df_x))
+
+# randomly select row numbers for training data set
+set.seed(1234) 
+train_ind <- sample(seq_len(nrow(df_x)), size = smp_size)
+
+# creating test and training sets for x
+df_x_train <- df_x[train_ind, ]
+df_x_test <- df_x[-train_ind, ]
+
+# creating test and training sets for y
+df_y_train <- df_y[train_ind]
+df_y_test <- df_y[-train_ind]
+```
+
+**Split 25% for validation**
+```{r}
+# 75% of the data from the training set is used for training and the rest for validation
+smp_size_validation <- floor(0.75 * nrow(df_x_train))
+
+# Store original training data before subsetting
+original_df_x_train <- df_x_train
+original_df_y_train <- df_y_train
+
+# randomly select row numbers for the new training set from the original training set
+train_ind_validation <- sample(seq_len(nrow(original_df_x_train)), size = smp_size_validation)
+
+# Subset for training data
+df_x_train <- original_df_x_train[train_ind_validation, ]
+df_y_train <- original_df_y_train[train_ind_validation]
+
+# Correcting the indices for validation sets using setdiff on the original training data
+validation_ind <- setdiff(seq_len(nrow(original_df_x_train)), train_ind_validation)
+
+# Creating validation sets
+df_x_validation <- original_df_x_train[validation_ind, ]
+df_y_validation <- original_df_y_train[validation_ind]
+```
+
+```{r}
+# Check df_y_train before applying SMOTE
+round(prop.table(table(df_y_train)), 4) * 100
+
+skim(df_y_train)
+```
+
+## Balancing Using SMOTE
+
+---
+
+```{r SMOTE}
+# Combine X and Y for the training set to prepare for SMOTE
+df_train <- cbind(df_x_train, df_y_train)
+
+# Apply SMOTE
+df_train_balanced <- SMOTE(df_y_train ~ ., data.frame(df_train), perc.over = 400, k=7, perc.under = 300)
+
+# Check the proportions for the class after SMOTE
+round(prop.table(table(df_train_balanced$df_y_train)), 4) * 100
+```
+
+```{r}
+#remove the Y column from the newly balanced training set
+df_x_train <- df_train_balanced %>% select(-df_y_train)
+
+#store the Y column
+df_y_train <- df_train_balanced %>% pull(df_y_train) %>% as.factor()
+```
+
+**Create 'delta' set to train using only past variables:  **
+```{r}
+# Variables from the PAST period
+delta_vars <- c("delta1_friend_cnt", "delta1_avg_friend_age", "delta1_avg_friend_male",
+               "delta1_friend_country_cnt", "delta1_subscriber_friend_cnt", "delta1_songsListened",
+               "delta1_lovedTracks", "delta1_posts", "delta1_playlists", "delta1_shouts", "delta1_good_country_to", "delta1_good_country_away")
+
+# Subset training and validation sets on delta vars
+df_x_train_delta <- df_x_train[, delta_vars]
+```
+
+#### SMOTE Summary :  
+
+---
+
+   - After testing multiple SMOTE parameters, the decided parameters are over sample minority class by 400% and under sample majority class 300%.
+   - This results in 9309 new synthetic observations and increases the proportion of the positive class from 6.79% to 29.41%. Not aiming for 50/50 split as the synthetic data needed for that may lead to over-fitting or a reduced training set size.
+
+- **Sample Results from SMOTE Parameter Tuning**
+
+  - Before SMOTE:
+      - 0: 56211, 1: 4095 total: 60306 perc: 6.79%
+
+  - After SMOTE:
+      - (500%, 250%):
+        - 0: 51187, 1: 24570 total: 75757 perc: 32.43%
+      - (600%, 250%):
+        - 0: 61425, 1: 28665 total 90090, perc: 31.82      
+      - (500%, 300%):
+        - 0: 61425, 1: 24570 total: 85995 perc: 28.57
+      - **(400%, 300%):**
+        - **0: 49140, 1: 20475 total: 69615 perc: 29.41**
+      - (400%, 200%):
+        - 0: 32760, 1: 20475 total: 53235 perc: 38.46%
+
+
+
+
+#### Data Splitting Summary :  
+
+---
+
+  **1.** Split `hn_df` into predictive variable set `df_x` and decision variable set `df_y`.
+  
+  **2.** Split 25% of data for Testing, creating `df_x_test` and  `df_y_test`.
+  
+  **3.** The remaining training data was then split with 25% for validation and the remaining 75% for training the models - `df_x_train`, `df_y_train`, `df_x_validation`, `df_y_validation`.
+  
+  **4.** We also want to train the models on only the past data (labeled delta1_variable-name). A subset of `df_x_train` was created that only has the change features (delta features). This is `df_x_train_delta`
+
+
+
+# 2. Model Training and Evaluation
+
+
+## Logistic Regession
+
+---
+
+
+#### Logistic Regression with Delta variable set: 
+```{r message=FALSE, warning=FALSE}
+# Fit glm model
+# Logistic Regression on past variables
+# Define the misclassification costs
+c_FN = 10  # Cost for false negatives
+c_FP = 1  # Cost for false positives
+
+# Adjust sample weights based on the class label
+sample_weights = ifelse(df_y_train == 1, c_FN, c_FP)
+
+# Train the glm model with the sample weights
+glm_fit_delta <- train(df_x_train_delta,
+                       df_y_train, 
+                       method = "glm",
+                       family = "binomial",
+                       preProc = c("center", "scale"),
+                       weights = sample_weights)  # adding the sample weights here
+
+
+
+# Predict on validation data with past variables
+glm_predict_delta <- predict(glm_fit_delta, newdata = df_x_validation)
+
+# Predict probability
+glm_predict_prob_delta <- predict(glm_fit_delta, newdata = df_x_validation, type="prob")
+```
+
+```{r message=FALSE, warning=FALSE}
+# Order the customers by the probability of being in the positive class
+top_customers_index_1 <- order(glm_predict_prob_delta[,2], decreasing = TRUE)[1:1000]
+
+# Now, on these top 1000 customers, the prediction is always 1 (since you're targeting them)
+glm_pred_num_delta <- rep(0, length(df_y_validation))
+glm_pred_num_delta[top_customers_index_1] <- 1
+
+# Print Confusion matrix, Accuracy, Sensitivity etc for past variables
+# This will only be on the top 1000 customers
+confusionMatrix(as.factor(glm_pred_num_delta[top_customers_index_1]), as.factor(df_y_validation[top_customers_index_1]), positive = "1")
+
+```
+
+```{r}
+# Check Summary of Model
+summary(glm_fit_delta$finalModel)
+```
+
+
+```{r}
+# Add results into clf_results and cost_benefit_df
+results <- record_results_1(glm_pred_num_delta, df_y_validation, "Logistic Regression - delta", clf_results, cost_benefit_df)
+clf_results <- results$clf_results
+cost_benefit_df <- results$cost_benefit_df
+```
+
+
+#### Logistic Regression with ALL features:
+```{r  message=FALSE,  warning=FALSE}
+
+glm_fit <- train(df_x_train,
+                 df_y_train, 
+                 method = "glm",
+                 family = "binomial",
+                 preProc = c("center", "scale"),
+                 weights = sample_weights
+                 )
+
+```
+
+```{r }
+# Predict on validation data
+glm_predict <- predict(glm_fit, newdata = df_x_validation)
+
+#Predict probability
+glm_predict_prob <- predict(glm_fit, newdata = df_x_validation, type="prob")
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# Order the customers by the probability of being in the positive class
+top_customers_index_2 <- order(glm_predict_prob[,2], decreasing = TRUE)[1:1000]
+
+# Now, on these top 1000 customers, the prediction is always 1 (since you're targeting them)
+glm_pred_num <- rep(0, length(df_y_validation))
+glm_pred_num[top_customers_index_2] <- 1
+
+# Print Confusion matrix, Accuracy, Sensitivity etc for past variables
+# This will only be on the top 1000 customers
+confusionMatrix(as.factor(glm_pred_num[top_customers_index_2]), as.factor(df_y_validation[top_customers_index_2]), positive = "1")
+
+```
+
+```{r}
+# Check Summary of Model
+summary(glm_fit$finalModel)
+```
+
+```{r}
+# Add results into clf_results and cost_benefit_df dataframe
+results <- record_results_1(glm_pred_num, df_y_validation, "Logistic Regression - Full", clf_results, cost_benefit_df)
+clf_results <- results$clf_results
+cost_benefit_df <- results$cost_benefit_df
+```
+
+## XG Boost
+
+---
+
+Before running other models, need to normalization, then re-split and re-balance. This is repetative but reduces errors in the rest of the script.
+
+#### Preprocessing and Normalizing
+
+**Normalize**
+```{r Normalize}
+# function to normalize data using min - max normalization.
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+# Normalize
+df_x_normalized <- as.data.frame(lapply(df_x, normalize))
+```
+
+**Split**
+```{r Split test}
+# 75% of the data is used for training and rest for testing
+smp_size <- floor(0.75 * nrow(df_x_normalized))
+
+# randomly select row numbers for training data set
+set.seed(1234)
+train_ind <- sample(seq_len(nrow(df_x_normalized)), size = smp_size)
+
+# creating test and training sets for x
+df_x_train <- df_x_normalized[train_ind, ]
+df_x_test <- df_x_normalized[-train_ind, ]
+
+# creating test and training sets for y
+df_y_train <- df_y[train_ind]
+df_y_test <- df_y[-train_ind]
+```
+
+```{r Split Validation}
+# 75% of the data is used for training and rest for validation
+smp_size_validation <- floor(0.75 * nrow(df_x_train))
+
+# Store original training data before subsetting
+original_df_x_train <- df_x_train
+original_df_y_train <- df_y_train
+
+# randomly select row numbers for the new training set from the original training set
+train_ind_validation <- sample(seq_len(nrow(original_df_x_train)), size = smp_size_validation)
+
+# Subset for training data
+df_x_train <- original_df_x_train[train_ind_validation, ]
+df_y_train <- original_df_y_train[train_ind_validation]
+
+# Correcting the indices for validation sets using setdiff on the original training data
+validation_ind <- setdiff(seq_len(nrow(original_df_x_train)), train_ind_validation)
+
+# Creating validation sets
+df_x_validation <- original_df_x_train[validation_ind, ]
+df_y_validation <- original_df_y_train[validation_ind]
+
+```
+
+**Balance Using SMOTE**
+```{r SMOTE pt.2}
+# Combine X and Y for the training set to prepare for SMOTE
+df_train <- cbind(df_x_train, df_y_train)
+
+# Apply SMOTE
+set.seed(1234)
+df_train_balanced <- SMOTE(df_y_train ~ ., data.frame(df_train), perc.over = 400, k=7, perc.under = 300)
+
+# Check the proportions for the class between all 3 datasets.
+round(prop.table(table(select(hn_df, adopter), exclude = NA)), 4) * 100
+round(prop.table(table(df_train_balanced$df_y_train)), 4) * 100
+round(prop.table(table(df_y_test)), 4) * 100
+```
+
+```{r}
+#remove the Y column from the newly balanced training set
+df_x_train <- df_train_balanced %>% select(-df_y_train)
+
+#store the Y column
+df_y_train <- df_train_balanced %>% pull(df_y_train) %>% as.factor()
+
+#convert level of factor Y variable to YES, NO 
+df_y_train <- as.factor(ifelse(df_y_train =="1", "YES", "NO"))
+df_y_test <- as.factor(ifelse(df_y_test =="1", "YES", "NO"))
+df_y_validation <- as.factor(ifelse(df_y_validation =="1", "YES", "NO"))
+```
+
+```{r}
+# Variables from the PAST period
+delta_vars <- c("delta1_friend_cnt", "delta1_avg_friend_age", "delta1_avg_friend_male",
+               "delta1_friend_country_cnt", "delta1_subscriber_friend_cnt", "delta1_songsListened",
+               "delta1_lovedTracks", "delta1_posts", "delta1_playlists", "delta1_shouts", "delta1_good_country_to", "delta1_good_country_away")
+
+# Subset training and validation sets on delta vars
+df_x_train_delta <- df_x_train[, delta_vars]
+```
+
+
+#### XG Boost - Delta
+
+```{r Fit XGB-Delta, message=FALSE,  warning=FALSE}
+# Create a training control object
+ctrl <- trainControl(method = "cv", number = 5)  # 5 Folds
+
+# Define the grid of hyperparameters
+param_grid <- expand.grid(
+  nrounds = c(100),             # boosting rounds
+  max_depth = c(3, 6, 9),       # depth of trees
+  eta = c(0.01, 0.1, 0.3),      # Learning rate
+  gamma = c(0),                 # Regularization parameter
+  colsample_bytree = c(1),      # Fraction of features used in tree building
+  min_child_weight = c(1),      # Minimum sum of instance weight (Hessian) needed in a child
+  subsample = c(1)              # Fraction of samples used for tree building
+)
+
+# Train the XGBoost model
+xgb_fit_delta <- train(
+  x = df_x_train_delta,
+  y = df_y_train,
+  method = "xgbTree",
+  trControl = ctrl,
+  tuneGrid = param_grid,
+  preProc = c("center", "scale"),
+  verbose = FALSE,              # Disable verbose output
+  nthread = 2                  # Specify the number of threads
+)
+
+```
+```{r}
+# print the final model
+xgb_fit_delta$finalModel
+```
+
+```{r }
+# Predict on validation data
+xgb_predict_delta <- predict(xgb_fit_delta, df_x_validation)
+
+
+# Predict probability
+xgb_predict_prob_delta <- predict(xgb_fit_delta, newdata = df_x_validation, type="prob")
+
+# Order the customers by the probability of being in the positive class
+top_customers_index_3 <- order(xgb_predict_prob_delta[,2], decreasing = TRUE)[1:1000]
+
+# Now, on these top 1000 customers, the prediction is always 1 (since you're targeting them)
+xgb_pred_num_delta <- rep(0, length(df_y_validation))
+xgb_pred_num_delta[top_customers_index_3] <- 1
+
+xgb_pred_num_delta <- as.factor(xgb_pred_num_delta)
+levels(xgb_pred_num_delta) <- c("NO", "YES")
+#levels(df_y_validation) <- c("NO", "YES")
+#levels(df_y_train) <- c("NO", "YES")
+
+# Print Confusion matrix, Accuracy, Sensitivity etc for past variables
+# This will only be on the top 1000 customers
+confusionMatrix(as.factor(xgb_pred_num_delta[top_customers_index_3]), as.factor(df_y_validation[top_customers_index_3]), positive = "YES")
+
+```
+
+```{r}
+# Add results into clf_results and cost_benefit_df
+results <- record_results(xgb_pred_num_delta, df_y_validation, "XGB - delta", clf_results, cost_benefit_df)
+clf_results <- results$clf_results
+cost_benefit_df <- results$cost_benefit_df
+```
+
+#### XG Boost - All features
+```{r Fit XGB-Full, message=FALSE,  warning=FALSE}
+xgb_fit_full <- train(
+  x = df_x_train,
+  y = df_y_train,
+  method = "xgbTree",
+  trControl = ctrl,
+  tuneGrid = param_grid,
+  preProc = c("center", "scale"),
+  verbose = FALSE,              # Disable verbose output
+  nthread = 2                  # Specify the number of threads
+)
+```
+
+```{r }
+# Predict on validation data
+xgb_predict_full <- predict(xgb_fit_full, df_x_validation)
+
+
+# Predict probability
+xgb_predict_prob_full <- predict(xgb_fit_full, newdata = df_x_validation, type="prob")
+
+# Order the customers by the probability of being in the positive class
+top_customers_index_4 <- order(xgb_predict_prob_full[,2], decreasing = TRUE)[1:1000]
+
+# Now, on these top 1000 customers, the prediction is always 1 (since you're targeting them)
+xgb_pred_num_full <- rep(0, length(df_y_validation))
+xgb_pred_num_full[top_customers_index_4] <- 1
+
+xgb_pred_num_full <- as.factor(xgb_pred_num_full)
+levels(xgb_pred_num_full) <- c("NO", "YES")
+
+# Print Confusion matrix, Accuracy, Sensitivity etc for past variables
+# This will only be on the top 1000 customers
+confusionMatrix(as.factor(xgb_pred_num_full[top_customers_index_4]), as.factor(df_y_validation[top_customers_index_4]), positive = "YES")
+
+```
+
+```{r}
+# Add results into clf_results and cost_benefit_df
+results <- record_results(xgb_pred_num_full, df_y_validation, "XGB - Full", clf_results, cost_benefit_df)
+clf_results <- results$clf_results
+cost_benefit_df <- results$cost_benefit_df
+```
+
+
+## Decision Tree Classification
+
+---
+
+#### Decision Tree - Delta
+
+```{r }
+# Cross validation
+cross_validation <- trainControl(## 10-fold CV
+                                method = "repeatedcv",
+                                number = 10,
+                                ## repeated three times
+                                repeats = 3)
+# Hyperparamter tuning
+# maxdepth =  the maximum depth of the tree that will be created or
+# the length of the longest path from the tree root to a leaf.
+
+Param_Grid <-  expand.grid(maxdepth = 2:10)
+
+dtree_fit_delta <- train(df_x_train_delta,
+                   df_y_train, 
+                   method = "rpart2",
+                   # split - criteria to split nodes
+                   parms = list(split = "gini"),
+                  tuneGrid = Param_Grid,
+                   trControl = cross_validation,
+                  # preProc -  perform listed pre-processing to predictor dataframe
+                   preProc = c("center", "scale"))
+
+# check the accuracy for different models
+dtree_fit_delta
+```
+
+```{r }
+# print the final model
+dtree_fit_delta$finalModel
+```
+
+```{r }
+# Plot decision tree
+prp(dtree_fit_delta$finalModel, box.palette = "Reds", tweak = 1.2)
+```
+
+```{r }
+# Predict on validation data
+dtree_predict_delta <- predict(dtree_fit_delta, newdata = df_x_validation)
+
+# Predict probability
+dtree_predict_prob_delta <- predict(dtree_fit_delta, newdata = df_x_validation, type="prob")
+
+# Order the customers by the probability of being in the positive class
+top_customers_index_5 <- order(dtree_predict_prob_delta[,2], decreasing = TRUE)[1:1000]
+
+# On these top 1000 customers, the prediction is always 1 (since you're targeting them)
+dtree_pred_num_delta <- rep(0, length(df_y_validation))
+dtree_pred_num_delta[top_customers_index_5] <- 1
+
+dtree_pred_num_delta <- as.factor(dtree_pred_num_delta)
+levels(dtree_pred_num_delta) <- c("NO", "YES")
+
+# Print Confusion matrix, Accuracy, Sensitivity etc for past variables
+# This will only be on the top 1000 customers
+confusionMatrix(as.factor(dtree_pred_num_delta[top_customers_index_5]), as.factor(df_y_validation[top_customers_index_5]), positive = "YES")
+
+```
+```{r}
+# Add results into clf_results and cost_benefit_df
+results <- record_results(dtree_pred_num_delta, df_y_validation, "Tree - Delta", clf_results, cost_benefit_df)
+clf_results <- results$clf_results
+cost_benefit_df <- results$cost_benefit_df
+```
+
+#### Decision Tree - All Features
+
+```{r }
+dtree_fit_full <- train(df_x_train,
+                   df_y_train, 
+                   method = "rpart2",
+                   # split - criteria to split nodes
+                   parms = list(split = "gini"),
+                  tuneGrid = Param_Grid,
+                   trControl = cross_validation,
+                  # preProc -  perform listed pre-processing to predictor dataframe
+                   preProc = c("center", "scale"))
+
+# check the accuracy for different models
+dtree_fit_full
+```
+
+```{r }
+# print the final model
+dtree_fit_full$finalModel
+```
+
+```{r }
+# Plot decision tree
+prp(dtree_fit_full$finalModel, box.palette = "Reds", tweak = 1.2)
+```
+
+```{r }
+# Predict on validation data
+dtree_predict_full <- predict(dtree_fit_full, newdata = df_x_validation)
+
+# Predict probability
+dtree_predict_prob_full <- predict(dtree_fit_full, newdata = df_x_validation, type="prob")
+
+# Order the customers by the probability of being in the positive class
+top_customers_index_6 <- order(dtree_predict_prob_full[,2], decreasing = TRUE)[1:1000]
+
+# On these top 1000 customers, the prediction is always 1 (since you're targeting them)
+dtree_pred_num_full <- rep(0, length(df_y_validation))
+dtree_pred_num_full[top_customers_index_6] <- 1
+
+dtree_pred_num_full <- as.factor(dtree_pred_num_full)
+levels(dtree_pred_num_full) <- c("NO", "YES")
+
+# Print Confusion matrix, Accuracy, Sensitivity etc for past variables
+# This will only be on the top 1000 customers
+confusionMatrix(as.factor(dtree_pred_num_full[top_customers_index_6]), as.factor(df_y_validation[top_customers_index_6]), positive = "YES")
+
+```
+
+```{r}
+# Add results into clf_results and cost_benefit_df
+results <- record_results(dtree_pred_num_full, df_y_validation, "Tree - Full", clf_results, cost_benefit_df)
+clf_results <- results$clf_results
+cost_benefit_df <- results$cost_benefit_df
+```
+
+
+## Nueral Network
+
+---
+
+
+#### Nueral Network - Delta
+
+```{r NN Train, message=FALSE,  warning=FALSE }
+
+# Parameters hyperperameter tuning
+my.grid <- expand.grid(.decay = c(0.5, 0.1), .size = c(5, 7))
+
+control <- trainControl(method="repeatedcv", number=10, repeats=3, classProbs=TRUE, summaryFunction=twoClassSummary)
+
+# Train NN model
+nn_fit_delta <- train(df_x_train_delta,
+                    df_y_train,
+                    method = "nnet",
+                    metric="Precision", # the metric used to select the best model
+                    trControl=control,
+                    trace = F,
+                    tuneGrid = my.grid,
+                    linout = 0,
+                    stepmax = 100, # stepmax: maximum steps for the training
+                    threshold = 0.01 )
+
+
+print(nn_fit_delta)
+
+# Plot Neural Network 
+plotnet(nn_fit_delta$finalModel, y_names = "Adoption")
+
+```
+
+```{r}
+# Predict on validation data
+nn_predict_delta <- predict(nn_fit_delta, newdata = df_x_validation)
+
+# Predict probability
+nn_predict_prob_delta <- predict(nn_fit_delta, newdata = df_x_validation, type="prob")
+
+# Order the customers by the probability of being in the positive class
+top_customers_index_9 <- order(nn_predict_prob_delta[,2], decreasing = TRUE)[1:1000]
+
+# On these top 1000 customers, the prediction is always 1 (since you're targeting them)
+nn_pred_num_delta <- rep(0, length(df_y_validation))
+nn_pred_num_delta[top_customers_index_9] <- 1
+
+nn_pred_num_delta <- as.factor(nn_pred_num_delta)
+levels(nn_pred_num_delta) <- c("NO", "YES")
+
+# Print Confusion matrix, Accuracy, Sensitivity etc for past variables
+# This will only be on the top 1000 customers
+confusionMatrix(as.factor(nn_pred_num_delta[top_customers_index_9]), as.factor(df_y_validation[top_customers_index_9]), positive = "YES")
+
+```
+
+```{r}
+# Add results into clf_results and cost_benefit_df
+results <- record_results(nn_pred_num_delta, df_y_validation, "Neural Network - Delta", clf_results, cost_benefit_df)
+clf_results <- results$clf_results
+cost_benefit_df <- results$cost_benefit_df
+```
+
+#### Nueral Network - Full Data
+
+```{r NN Train Full, message=FALSE,  warning=FALSE }
+
+# Parameters hyperperameter tuning
+my.grid <- expand.grid(.decay = c(0.5, 0.1), .size = c(5, 7))
+
+control <- trainControl(method="repeatedcv", number=10, repeats=3, classProbs=TRUE, summaryFunction=twoClassSummary)
+
+# Train NN model
+nn_fit_full <- train(df_x_train,
+                    df_y_train,
+                    method = "nnet",
+                    metric="Precision", # the metric used to select the best model
+                    trControl=control,
+                    trace = F,
+                    tuneGrid = my.grid,
+                    linout = 0,
+                    stepmax = 100, # stepmax: maximum steps for the training
+                    threshold = 0.01 )
+
+
+print(nn_fit_full)
+```
+
+```{r}
+# Predict on validation data
+nn_predict_full <- predict(nn_fit_full, newdata = df_x_validation)
+
+# Predict probability
+nn_predict_prob_full <- predict(nn_fit_full, newdata = df_x_validation, type="prob")
+
+# Order the customers by the probability of being in the positive class
+top_customers_index_10 <- order(nn_predict_prob_full[,2], decreasing = TRUE)[1:1000]
+
+# On these top 1000 customers, the prediction is always 1 (since you're targeting them)
+nn_pred_num_full <- rep(0, length(df_y_validation))
+nn_pred_num_full[top_customers_index_10] <- 1
+
+nn_pred_num_full <- as.factor(nn_pred_num_full)
+levels(nn_pred_num_full) <- c("NO", "YES")
+
+# Print Confusion matrix, Accuracy, Sensitivity etc for past variables
+# This will only be on the top 1000 customers
+confusionMatrix(as.factor(nn_pred_num_full[top_customers_index_10]), as.factor(df_y_validation[top_customers_index_10]), positive = "YES")
+
+```
+
+```{r}
+# Add results into clf_results and cost_benefit_df
+results <- record_results(nn_pred_num_full, df_y_validation, "Neural Network - Full", clf_results, cost_benefit_df)
+clf_results <- results$clf_results
+cost_benefit_df <- results$cost_benefit_df
+```
+
+# Compare Accuracy for All Classification models
+```{r Plot Accuracies}
+# Plot accuracy for all the Classification Models
+# Arrange in long format
+clf_results_long <- clf_results %>%
+  gather(Metric, Score, -Model)
+
+# Calculate mean values for geom_hline
+mean_accuracy <- mean(clf_results_long$Score[clf_results_long$Metric == "Accuracy"])
+mean_precision <- mean(clf_results_long$Score[clf_results_long$Metric == "Precision"])
+mean_recall <- mean(clf_results_long$Score[clf_results_long$Metric == "Recall"])
+mean_f1 <- mean(clf_results_long$Score[clf_results_long$Metric == "F1"])
+
+# Plot Scores
+ggplot(clf_results_long %>% arrange(Model, desc(Score)),
+       aes(x = Model, y = Score, fill = Metric)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.3) +
+  coord_cartesian(ylim = c(0.00, 1)) +
+  geom_hline(aes(yintercept = mean_accuracy),
+             colour = "steelblue", linetype = "dashed") +
+  geom_hline(aes(yintercept = mean_precision),
+             colour = "orange", linetype = "dashed") +
+  geom_hline(aes(yintercept = mean_recall),
+             colour = "red", linetype = "dashed") +
+  geom_hline(aes(yintercept = mean_f1),
+             colour = "purple", linetype = "dashed") +
+  ggtitle("Compare Performance Scores all Models") +
+  theme(plot.title = element_text(color = "black", size = 10, hjust = 0.5),
+        axis.text.x = element_text(angle = -45)) +
+  labs(x = "Model", y = "Score") +
+  scale_fill_manual(values = c("Accuracy" = "steelblue", "Precision" = "orange", "Recall" = "red", "F1" = "purple"))
+
+
+```
+
+```{r Plot Profits, echo=FALSE}
+# Print confusion matrix
+print(cost_benefit_df[, c("Model", "TP", "FN", "FP", "TN")])
+
+```
+
+```{r}
+# Compare with true values
+table(df_y_validation)
+```
+
+```{r}
+# Print model scores
+print(clf_results)
+```
+
+
+# 3. Select Best Model and Predict on Test Set
+
+---
+
+
+### Explain Rationale for Choosing the XG Boost Model:
+
+---
+
+When evaluating these models, I only looked at performance based on the top 1000 probabilities that the model chose in order to better understand the models impact on the actual promotion. the task is to determine which model is most suited for identifying the top 1,000 free users who are most likely to convert to premium if targeted with the promotion. The goal is to maximize the number of actual conversions out of these 1000 offers.
+
+In model selection, I focused mainly on 4 factors:
+
+  - **True Positives**: Since the models were evaluated and measured only on the top 1000 users they selected from the validation set, the number of true positives was the most important metric during this process. The number of true positives gives us the clearest estimate of how many conversions we can expect to get with the 1000 user promotion.
+  
+  - **Recall**:Out of all the actual positives, how many did the model predict. This was the second most important metric in this process because it represents the ability of the model to capture all potential converters. We do not want to miss any would-be converters if they had received the promotion.
+  
+  - **Precision**:Out of all the positive predictions the model made, how many were actually correct.This is a valuable metric in this context because we want to ensure that those we target are indeed likely to convert and we are not wasting promotions. Since we only measured on the top 1000 predictions from the validation set, the precision is just a percentage of the number of true positives out of 1000. 
+  
+  - **F1**: This is the harmonic mean of precision and recall and gives us an overall measure of model performance.
+  
+Given the prioritized metrics, the chosen model for this task is the **XG Boost** model, that was trained on the entire data set. The `XG Boost - Full` model predicted the highest number of true positives out of 1000 (298), and produced the highest ***Precision (0.298)***, ***Recall (0.221)***, and ***F1 (0.254)*** scores. This model gives us the best chance of producing the highest number of conversions. In addition, the XG Boost model is able to handle non-linear relationships and is less prone to over fitting which provides more confidence when deploying it in the real world scenario.
+
+*The performance of models with full variables (both previous and current period) consistently outperforms models built only on the delta (previous period's change) variables. This indicates that current period data provides significant and valuable predictive power. Therefore, XG Boost trained on the full data set was selected over the XG Boost model trained only on delta variables.*
+
+
+### Make final predictions using XG Boost model:
+
+---
+
+```{r Final Predictions}
+# Final Predictions on test set
+
+final_predictions <- predict(xgb_fit_full, newdata = df_x_test, type = "prob")
+```
+
+```{r Combine results}
+# Store the probability of being a premium user
+
+probability_premium <- final_predictions$YES
+```
+
+```{r Join net_user}
+# Extracting net_user for the test set
+
+net_user_test <- hn_df$net_user[-train_ind]
+
+# Combine probabilities with net_user
+
+result_df <- data.frame(net_user = net_user_test, probability_premium = probability_premium, adopter = df_y_test)
+
+# Filter out current premium users
+
+free_users_df <- result_df[result_df$adopter == "NO", ]
+
+# Selecting top 1000 users
+
+top_1000_users <- head(free_users_df[order(-free_users_df$probability_premium),], 1000)
+
+# View top 1000 users
+
+print(top_1000_users)
+```
+
+  - *Note: The above list of users has "NO" under adopter because these are the people who have not adopted       premium, but are must likely to if we were to send a promotional email with a 2-month free trial offer.*
+
+### How to compute ROI from proposed model
+
+---
+
+##### 1. Simple ROI Calculation
+If we understand the total cost and revenue we can find the ROI. The total cost would be the cost of offering the two-month trial to 1000 people (plus cost of producing model, additional marketing costs, or lost revenue). The revenue would be the actual number of user that signed up for premium after the trial multiplied by the premium subscription price. The ROI can then be calculated (rev-cost / cost). However, in order to understand the true ROI of using a predictive model it's best to compare the expected ROI from a predictive model to the alternative of randomly choosing 1000 people to target with the promotion. In theory, we can expect about 6.7% or 67 people to convert if we target 1000 random users because that is the proportion of adopters vs non-adopters in our data.
+
+##### 2. Compare with Random Sampling
+We can take this a step further by generating a scenario where 1000 people have been randomly chosen to receive the proportion (this is assumed to be the alternative procedure if predictive models were not being used)
+
+```{r Baseline Randomized Selection}
+# Randomly select 1000 users
+set.seed(1234)
+random_selected_indices <- sample(1:length(df_y_validation), 1000)
+
+# Create predictions vector filled with 0s (indicating "NO")
+random_predictions <- rep(0, length(df_y_validation))
+random_predictions[random_selected_indices] <- 1 # Set the randomly selected users as 1 (indicating "YES")
+
+random_predictions <- as.factor(random_predictions)
+levels(random_predictions) <- c("NO", "YES")
+
+# Add results into clf_results and cost_benefit_df for the random selection model
+results_random <- record_results(random_predictions, df_y_validation, "Random Selection", clf_results, cost_benefit_df)
+clf_results <- results_random$clf_results
+cost_benefit_df <- results_random$cost_benefit_df
+
+# Compare Predictive Model vs Randomly Selecting 1000 customer
+clf_results %>%
+  filter(Model %in% c("XGB - Full", "Random Selection")) %>%
+  print()
+
+cost_benefit_df %>%
+  filter(Model %in% c("XGB - Full", "Random Selection")) %>%
+  select(Model, TP, FN, FP, TN) %>%
+  print()
+```
+
+Here, we can see that the use of predictive modeling to select the top 1000 users would result in 221 additional premium users than if you had randomly targeted.This generates almost 4x additional revenue, and is more cost efficient by not wasting the two-month trial on as many people that won't ultimately sign up for premium.
+
+##### 3. Estimate Cost-Benefit Matrix
+If we know the cost-benefit matrix, we can calculate the expected profit of the predictive model for promotion vs random sampling.
+For demonstrative purposes, we can assume that the premium subscription to HighNote is \$1000 and it costs us \$100 to provide the promotion. Our cost-benefit matrix would be:
+
+  - True Positive = \$900 (revenue - cost = \$1000 - \$100)
+  - True Negative = 0
+  - False Negative = 0
+  - False Positive = -\$100 (cost)
+
+    - *There may be other costs associated true negatives and false positives. For example, what is the opportunity cost not sending the promotion to a person that would have signed up for premium had they been targeted (cost of false negative), and what is the benefit or not sending the offer to someone who would not sign up (benefit of true negative).*
+
+
+Using these example numbers, we can compare the profits generated by predictive model vs the alternative of random selection:
+
+```{r}
+# Cost-benefit matrix
+ benefit_TP = 900
+ benefit_TN = 0
+ cost_FN = 0
+ cost_FP = -100
+#Calculate profit
+ cost_benefit_df <- cost_benefit_df %>%
+                     mutate(Profit = (benefit_TP * TP) + (benefit_TN * TN) +
+                                     (cost_FP * FP) + (cost_FN * FN))
+# Plot
+ ggplot(cost_benefit_df %>% arrange(desc(Profit)) %>%
+        mutate(Model=factor(Model, levels=Model) ),
+        aes(x = Model, y = Profit)) +
+   geom_bar(stat = "identity" , width=0.3, fill="steelblue") +
+   coord_cartesian(ylim = c(0, 100000)) +
+   geom_hline(aes(yintercept = mean(Profit)),
+              colour = "green",linetype="dashed") +
+   ggtitle("Profit Comparison: Predictive vs Random") +
+   scale_y_continuous(breaks = seq(-100000, 250000, by = 50000),
+                      labels = scales::comma) +
+   theme(plot.title = element_text(color="black", size=10, hjust = 0.5))
+```
+
+While these numbers are not true values, we can see that using a predictive model to select the top 1,000 customers to target results in significantly higher profits than would be generated if people were selected at random.
+
+---
+
+### Strategy for deploying the targeting strategy from the predictive model
+
+
+
+##### 1. A/B Testing
+Before fully deploying the promotion to a wider audience, they should first run a controlled A/B test. Offer the promotion to a subset of users selected by the XG Boost model (treatment group) and to another subset of users that have been randomly selected (control group). The hypothesis is that the results of the treatment group would result in *size of subset* × 0.298 conversions which we derive from the XGB Model performance on validation set, and the results of the control group would be *size of subset* × 0.077 conversions (derived from the generated randomized scenario above). We can then compare the conversion rates to validate the model's effectiveness. 
+
+
+##### 2. Deployment
+If the null hypothesis (H0: predictive conversions = randomized conversions) from our A/B test can be rejected, then we can deploy the promotion and target 1000 customers with the offer.
+
+
+##### 3. Evaluate Real Findings and Impove Model
+After deployment, we can monitor the results and continue to tune and adjust the model. We can also try to improve our data collection process so that we have cleaner data to train our models with and there is less of a dependence on imputation. Additionally, we can attempt to collect new data (i.e. web search data, clicked on premium links before, better location data, etc.) which may improve our model. Furthermore, we may adjust our decision logic afer the initial offer. For example, we may want to avoid targeting people that have such a high probability of converting to premium that they would convert no matter what - avoiding these people would save use the cost of the two-month promotion (during which they may have otherwise been a paying premium user). Changes in decision logic can also be implemented into the updated model.
+
+
+##### 4. Deploy on Larger Set
+We can then run another A/B test with the improved model (trained on more thorough data with additional features) vs original model, and then re-deploy the promotion on an even larger group.
+
+
+
+```{r include=FALSE}
+
+rmarkdown::render("Credit-Card_Classifier.Rmd", output_format = "github_document")
+
+```
+
+
