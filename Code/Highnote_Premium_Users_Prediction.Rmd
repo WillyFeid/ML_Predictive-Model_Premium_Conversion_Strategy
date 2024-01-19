@@ -2,19 +2,13 @@
 title: "Highnote: Freemium to Premium Conversion Prediction"
 author: "Willy Feid"
 date: "2023-09-13"
-output:
-  html_document:
-    toc: true
-    toc_depth: 2
-    df_print: paged
-  pdf_document:
-    toc: yes
-    toc_depth: 2
+output: github_document
 ---
-\newpage
 
 
-```{r Load Libraries, message=FALSE, warning=FALSE, include=FALSE}
+
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
 library("tidyverse")
 library("skimr") # skim function
 library("readxl") # used to read excel files
@@ -49,7 +43,7 @@ hn_df <- read_csv("../Data/HN_data_PostModule.csv", col_types = "fnnnnnnnnnnnnnn
 
 ```{r Preview Data}
 # Preview data
-skim(hn_df)
+# skim(hn_df)
 ```
 
 ```{r}
@@ -89,7 +83,7 @@ for (col in names(numeric_data_clean)) {
 
 ```{r}
 # View NA's to refer back to during cleaning
-skim(hn_df)
+# skim(hn_df)
 ```
 
 
@@ -208,7 +202,7 @@ hn_df <- cbind(hn_df, encoded_data)
 # Drop `good_country_UNK` -> causes multicollinearity 
 hn_df$good_country.UNK <- NULL
 # Check clean data
-skim(hn_df)
+# skim(hn_df)
 ```
 #### Cleaning Summary
 
@@ -369,7 +363,7 @@ df_y_validation <- original_df_y_train[validation_ind]
 # Check df_y_train before applying SMOTE
 round(prop.table(table(df_y_train)), 4) * 100
 
-skim(df_y_train)
+#skim(df_y_train)
 ```
 
 ## Balancing Using SMOTE
@@ -1241,11 +1235,7 @@ After deployment, we can monitor the results and continue to tune and adjust the
 We can then run another A/B test with the improved model (trained on more thorough data with additional features) vs original model, and then re-deploy the promotion on an even larger group.
 
 
-
-```{r include=FALSE}
-
-rmarkdown::render("Credit-Card_Classifier.Rmd", output_format = "github_document")
-
+```{r}
+#rmarkdown::render("Highnote_Premium_Users_Prediction.Rmd", output_format = "github_document")
 ```
-
 
