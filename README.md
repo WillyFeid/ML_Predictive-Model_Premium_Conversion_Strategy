@@ -52,31 +52,31 @@ Given the prioritized metrics, the chosen model for this task is the **XG Boost*
 
 **Decision Tree Structure**: Visual representation of the decision-making process in the tree model.
 
-<img src="unnamed-chunk-38-1" width="600">
+<img src="Code/Highnote_Premium_Users_Prediction_files/figure-gfm/unnamed-chunk-38-1.png" width="600">
 
 ---
 
 **Neural Network Structure**: A diagram showcasing the architecture of the neural network model.
 
-<img src="NN-Train-1.png" width="600">
+<img src="Code/Highnote_Premium_Users_Prediction_files/figure-gfm/NN-Train-1.png" width="600">
 
 ---
 
 **Model Performance Table**: A detailed table displaying the TP, FN, FP, and TN for each model.
 
-<img src="Table_Model_performance.png" width="600">
+<img src="Code/Highnote_Premium_Users_Prediction_files/figure-gfm/Table_Model_performance.png" width="600">
 
 ---
 
 **Model Evaluation Metrics Table**: A comprehensive table showing the Accuracy, Precision, Recall, and F1 Scores for each model.
 
-<img src="Table_Accuracy_Recall.png" width="600">
+<img src="Code/Highnote_Premium_Users_Prediction_files/figure-gfm/Table_Accuracy_Recall.png" width="600">
 
 ---
 
 **Performance Metrics Bar Chart**: A bar chart comparing the Accuracy, Precision, Recall, and F1 Scores across all models.
 
-<img src="Plot-Accuracies-1.png" width="600">
+<img src="Code/Highnote_Premium_Users_Prediction_files/figure-gfm/Plot-Accuracies-1.png" width="800">
 
 ---
 
@@ -87,9 +87,9 @@ Given the prioritized metrics, the chosen model for this task is the **XG Boost*
 Generating a scenario where 1000 people have been randomly chosen to receive the proportion (this is
 assumed to be the alternative procedure if predictive models were not being used)
 
-<img src="Table-XGB-Random-1" width="600">
+<img src="Code/Highnote_Premium_Users_Prediction_files/figure-gfm/Table-XGB-Random-1.png" width="500">
 
-<img src="Table-XGB-Random-2" width="600">
+<img src="Code/Highnote_Premium_Users_Prediction_files/figure-gfm/Table-XGB-Random-2.png" width="500">
 
 Here, we can see that the use of predictive modeling to select the top 1000 users would result in 221 additional premium users than if you had
 randomly targeted.This generates almost 4x additional revenue, and is more cost-efficient by not wasting the two-month trial on as many
@@ -97,7 +97,7 @@ people that won’t ultimately sign up for premium.
 
 **Estimating Cost-Benefit Matrix**
 
-<img src="Profit comparison of XGB vs Random" width="600">
+<img src="Code/Highnote_Premium_Users_Prediction_files/figure-gfm/Table_Model_performance.png" width="600">
 
 ---
 
